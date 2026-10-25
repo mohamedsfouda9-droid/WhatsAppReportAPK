@@ -1,4 +1,4 @@
-name: Fix and Build APK
+name: Build WhatsAppReport V2.0 APK
 
 on:
   push:
@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   build:
+    name: Extract and Build APK
     runs-on: ubuntu-latest
 
     steps:
@@ -22,18 +23,22 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Extract project ZIP
+      - name: Find and extract project ZIP
         shell: bash
         run: |
           set -e
+
           ZIP_FILE=$(find . -type f -iname "*.zip" \
-            -not -path "./.git/*" -print -quit)
+            -not -path "./.git/*" \
+            -not -path "./extracted/*" \
+            -print -quit)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: No ZIP file found in repository."
+            echo "ERROR: No project ZIP found."
             exit 1
           fi
 
+          echo "Using ZIP: $ZIP_FILE"
           mkdir -p extracted
           unzip -o "$ZIP_FILE" -d extracted
 
@@ -41,20 +46,23 @@ jobs:
         shell: bash
         run: |
           set -e
+
           SETTINGS=$(find extracted -type f \
-            \( -name settings.gradle -o -name settings.gradle.kts \) \
+            \( -name "settings.gradle" \
+            -o -name "settings.gradle.kts" \) \
             -print -quit)
 
           if [ -z "$SETTINGS" ]; then
-            echo "ERROR: Gradle settings file not found."
+            echo "ERROR: Gradle settings file not found in ZIP."
+            find extracted -maxdepth 5 -type f | head -200
             exit 1
           fi
 
           PROJECT_DIR=$(dirname "$SETTINGS")
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Project found: $PROJECT_DIR"
+          echo "Android project: $PROJECT_DIR"
 
-      - name: Fix resources and JVM targets
+      - name: Fix Android resources and JVM targets
         shell: bash
         run: |
           set -e
@@ -65,7 +73,7 @@ jobs:
 
           root = Path("extracted")
 
-          # Fix the invalid drawable resource reference.
+          # Fix the background drawable reference.
           for p in root.rglob("demon_background_overlay.xml"):
               s = p.read_text()
               s = s.replace(
@@ -75,69 +83,28 @@ jobs:
               p.write_text(s)
               print("Checked resource:", p)
 
-          # Find the app module Gradle build file.
-          candidates = list(root.glob("**/app/build.gradle.kts"))
-          groovy = False
+          # Fix common Java/Kotlin JVM target settings.
+          for p in list(root.rglob("build.gradle")) + list(root.rglob("build.gradle.kts")):
+              s = p.read_text()
+              old = s
 
-          if not candidates:
-              candidates = list(root.glob("**/app/build.gradle"))
-              groovy = True
-
-          if not candidates:
-              raise SystemExit(
-                  "ERROR: app/build.gradle or app/build.gradle.kts not found."
+              s = s.replace(
+                  "JavaVersion.VERSION_1_8",
+                  "JavaVersion.VERSION_17"
+              )
+              s = s.replace(
+                  "JvmTarget.JVM_1_8",
+                  "JvmTarget.JVM_17"
+              )
+              s = re.sub(
+                  r'jvmTarget\s*=\s*["\']1\.8["\']',
+                  'jvmTarget = "17"',
+                  s
               )
 
-          p = candidates[0]
-          s = p.read_text()
-
-          # Normalize existing Java 8 settings.
-          s = s.replace("JavaVersion.VERSION_1_8", "JavaVersion.VERSION_17")
-          s = re.sub(
-              r'JavaVersion\.toVersion\(["\']1\.8["\']\)',
-              'JavaVersion.VERSION_17',
-              s
-          )
-
-          if groovy:
-              # Force Java and Kotlin to target JVM 17 in Groovy DSL.
-              s += """
-
-          // Automatically enforced JVM compatibility
-          android {
-              compileOptions {
-                  sourceCompatibility JavaVersion.VERSION_17
-                  targetCompatibility JavaVersion.VERSION_17
-              }
-          }
-
-          tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
-              kotlinOptions {
-                  jvmTarget = "17"
-              }
-          }
-          """
-          else:
-              # Force Java and Kotlin to target JVM 17 in Kotlin DSL.
-              s += """
-
-          // Automatically enforced JVM compatibility
-          android {
-              compileOptions {
-                  sourceCompatibility = JavaVersion.VERSION_17
-                  targetCompatibility = JavaVersion.VERSION_17
-              }
-          }
-
-          tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
-              compilerOptions {
-                  jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
-              }
-          }
-          """
-
-          p.write_text(s)
-          print("Updated JVM settings:", p)
+              if s != old:
+                  p.write_text(s)
+                  print("Updated JVM target:", p)
           PY
 
       - name: Set up Gradle
@@ -145,7 +112,7 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build APK
+      - name: Build debug APK
         shell: bash
         run: |
           set -e
@@ -161,6 +128,6 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: WhatsAppReport-debug-apk
+          name: WhatsAppReport-v2.0-debug-apk
           path: extracted/**/build/outputs/apk/debug/*.apk
           if-no-files-found: error
