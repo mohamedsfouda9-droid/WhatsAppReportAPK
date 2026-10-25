@@ -32,15 +32,12 @@ jobs:
             -not -path "./.git/*" -print -quit)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: No project ZIP found in repository."
+            echo "ERROR: No ZIP file found."
             exit 1
           fi
 
-          echo "ZIP found: $ZIP_FILE"
           mkdir -p extracted
           unzip -o "$ZIP_FILE" -d extracted
-
-          echo "Extract completed."
 
       - name: Locate Android project
         shell: bash
@@ -53,52 +50,81 @@ jobs:
             -print -quit)
 
           if [ -z "$SETTINGS" ]; then
-            echo "ERROR: Android Gradle project not found in ZIP."
-            echo "Expected settings.gradle or settings.gradle.kts."
-            find extracted -maxdepth 4 -type f | head -200
+            echo "ERROR: Gradle settings file not found in ZIP."
             exit 1
           fi
 
           PROJECT_DIR=$(dirname "$SETTINGS")
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
           echo "Project directory: $PROJECT_DIR"
 
-      - name: Fix background resource reference
+      - name: Fix background reference
         shell: bash
         run: |
-          set -e
-
           find extracted -type f \
             -name "demon_background_overlay.xml" \
-            -print0 |
-          while IFS= read -r -d '' FILE; do
-            echo "Checking $FILE"
+            -exec sed -i \
+            's|@drawable-nodpi/demon_background|@drawable/demon_background|g' {} \;
 
-            sed -i \
-              's|@drawable-nodpi/demon_background|@drawable/demon_background|g' \
-              "$FILE"
-          done
-
-          echo "Background reference check completed."
-
-      - name: Check background image
+      - name: Align Java and Kotlin JVM targets
         shell: bash
         run: |
           set -e
-          cd "$PROJECT_DIR"
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
 
-          find app/src/main/res -type f \
-            -iname "demon_background.*" -print || true
+          root = Path("extracted")
 
-          if [ -f app/src/main/res/drawable-nodpi/demon_background.jpg ]; then
-            echo "Background image found."
-          elif [ -f app/src/main/res/drawable/demon_background.jpg ]; then
-            echo "Background image found."
-          else
-            echo "WARNING: Expected background image was not found."
-            echo "Build may fail if the XML references a missing image."
-          fi
+          for p in root.rglob("build.gradle.kts"):
+              text = p.read_text()
+              original = text
+
+              # Set Java compatibility to 17 where configured.
+              text = re.sub(
+                  r'JavaVersion\.VERSION_1_8',
+                  'JavaVersion.VERSION_17',
+                  text
+              )
+
+              # Set Kotlin JVM target to 17 in common Kotlin DSL syntax.
+              text = re.sub(
+                  r'JvmTarget\.JVM_1_8',
+                  'JvmTarget.JVM_17',
+                  text
+              )
+
+              # Also handle older Kotlin target syntax.
+              text = re.sub(
+                  r'jvmTarget\s*=\s*"1\.8"',
+                  'jvmTarget = "17"',
+                  text
+              )
+
+              if text != original:
+                  p.write_text(text)
+                  print(f"Updated JVM targets in {p}")
+
+          for p in root.rglob("build.gradle"):
+              text = p.read_text()
+              original = text
+
+              text = re.sub(
+                  r'JavaVersion\.VERSION_1_8',
+                  'JavaVersion.VERSION_17',
+                  text
+              )
+
+              text = re.sub(
+                  r'jvmTarget\s*=\s*[\'"]1\.8[\'"]',
+                  'jvmTarget = "17"',
+                  text
+              )
+
+              if text != original:
+                  p.write_text(text)
+                  print(f"Updated JVM targets in {p}")
+          PY
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
