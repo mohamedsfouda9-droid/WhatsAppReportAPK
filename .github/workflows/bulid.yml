@@ -1,4 +1,4 @@
-name: Build APK From ZIP
+name: Fix and Build APK
 
 on:
   push:
@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   build:
-    name: Extract, Fix and Build APK
     runs-on: ubuntu-latest
 
     steps:
@@ -23,16 +22,15 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Find and extract project ZIP
+      - name: Extract project ZIP
         shell: bash
         run: |
           set -e
-
           ZIP_FILE=$(find . -type f -iname "*.zip" \
             -not -path "./.git/*" -print -quit)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: No ZIP file found."
+            echo "ERROR: No ZIP file found in repository."
             exit 1
           fi
 
@@ -43,87 +41,103 @@ jobs:
         shell: bash
         run: |
           set -e
-
           SETTINGS=$(find extracted -type f \
-            \( -name "settings.gradle" \
-            -o -name "settings.gradle.kts" \) \
+            \( -name settings.gradle -o -name settings.gradle.kts \) \
             -print -quit)
 
           if [ -z "$SETTINGS" ]; then
-            echo "ERROR: Gradle settings file not found in ZIP."
+            echo "ERROR: Gradle settings file not found."
             exit 1
           fi
 
           PROJECT_DIR=$(dirname "$SETTINGS")
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Project directory: $PROJECT_DIR"
+          echo "Project found: $PROJECT_DIR"
 
-      - name: Fix background reference
-        shell: bash
-        run: |
-          find extracted -type f \
-            -name "demon_background_overlay.xml" \
-            -exec sed -i \
-            's|@drawable-nodpi/demon_background|@drawable/demon_background|g' {} \;
-
-      - name: Align Java and Kotlin JVM targets
+      - name: Fix resources and JVM targets
         shell: bash
         run: |
           set -e
+
           python3 - <<'PY'
           from pathlib import Path
           import re
 
           root = Path("extracted")
 
-          for p in root.rglob("build.gradle.kts"):
-              text = p.read_text()
-              original = text
+          # Fix the invalid drawable resource reference.
+          for p in root.rglob("demon_background_overlay.xml"):
+              s = p.read_text()
+              s = s.replace(
+                  "@drawable-nodpi/demon_background",
+                  "@drawable/demon_background"
+              )
+              p.write_text(s)
+              print("Checked resource:", p)
 
-              # Set Java compatibility to 17 where configured.
-              text = re.sub(
-                  r'JavaVersion\.VERSION_1_8',
-                  'JavaVersion.VERSION_17',
-                  text
+          # Find the app module Gradle build file.
+          candidates = list(root.glob("**/app/build.gradle.kts"))
+          groovy = False
+
+          if not candidates:
+              candidates = list(root.glob("**/app/build.gradle"))
+              groovy = True
+
+          if not candidates:
+              raise SystemExit(
+                  "ERROR: app/build.gradle or app/build.gradle.kts not found."
               )
 
-              # Set Kotlin JVM target to 17 in common Kotlin DSL syntax.
-              text = re.sub(
-                  r'JvmTarget\.JVM_1_8',
-                  'JvmTarget.JVM_17',
-                  text
-              )
+          p = candidates[0]
+          s = p.read_text()
 
-              # Also handle older Kotlin target syntax.
-              text = re.sub(
-                  r'jvmTarget\s*=\s*"1\.8"',
-                  'jvmTarget = "17"',
-                  text
-              )
+          # Normalize existing Java 8 settings.
+          s = s.replace("JavaVersion.VERSION_1_8", "JavaVersion.VERSION_17")
+          s = re.sub(
+              r'JavaVersion\.toVersion\(["\']1\.8["\']\)',
+              'JavaVersion.VERSION_17',
+              s
+          )
 
-              if text != original:
-                  p.write_text(text)
-                  print(f"Updated JVM targets in {p}")
+          if groovy:
+              # Force Java and Kotlin to target JVM 17 in Groovy DSL.
+              s += """
 
-          for p in root.rglob("build.gradle"):
-              text = p.read_text()
-              original = text
+          // Automatically enforced JVM compatibility
+          android {
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
 
-              text = re.sub(
-                  r'JavaVersion\.VERSION_1_8',
-                  'JavaVersion.VERSION_17',
-                  text
-              )
+          tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          """
+          else:
+              # Force Java and Kotlin to target JVM 17 in Kotlin DSL.
+              s += """
 
-              text = re.sub(
-                  r'jvmTarget\s*=\s*[\'"]1\.8[\'"]',
-                  'jvmTarget = "17"',
-                  text
-              )
+          // Automatically enforced JVM compatibility
+          android {
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+          }
 
-              if text != original:
-                  p.write_text(text)
-                  print(f"Updated JVM targets in {p}")
+          tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+              compilerOptions {
+                  jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+              }
+          }
+          """
+
+          p.write_text(s)
+          print("Updated JVM settings:", p)
           PY
 
       - name: Set up Gradle
@@ -131,7 +145,7 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build Android APK
+      - name: Build APK
         shell: bash
         run: |
           set -e
@@ -139,9 +153,9 @@ jobs:
 
           if [ -f gradlew ]; then
             chmod +x gradlew
-            ./gradlew assembleDebug
+            ./gradlew --no-daemon clean assembleDebug
           else
-            gradle assembleDebug
+            gradle --no-daemon clean assembleDebug
           fi
 
       - name: Upload APK
