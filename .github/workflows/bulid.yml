@@ -10,10 +10,11 @@ permissions:
 
 jobs:
   build:
+    name: Extract, Fix and Build APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download repository files
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install Java 17
@@ -22,25 +23,24 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Find and extract ZIP
+      - name: Find and extract project ZIP
         shell: bash
         run: |
           set -e
+
           ZIP_FILE=$(find . -type f -iname "*.zip" \
             -not -path "./.git/*" -print -quit)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: No ZIP file found in repository."
-            echo "Upload your project ZIP to GitHub first."
+            echo "ERROR: No project ZIP found in repository."
             exit 1
           fi
 
-          echo "Found ZIP: $ZIP_FILE"
+          echo "ZIP found: $ZIP_FILE"
           mkdir -p extracted
           unzip -o "$ZIP_FILE" -d extracted
 
-          echo "Extracted project files:"
-          find extracted -maxdepth 4 -type f | head -200
+          echo "Extract completed."
 
       - name: Locate Android project
         shell: bash
@@ -53,14 +53,52 @@ jobs:
             -print -quit)
 
           if [ -z "$SETTINGS" ]; then
-            echo "ERROR: No settings.gradle file found inside ZIP."
-            echo "The ZIP must contain a complete Android Gradle project."
+            echo "ERROR: Android Gradle project not found in ZIP."
+            echo "Expected settings.gradle or settings.gradle.kts."
+            find extracted -maxdepth 4 -type f | head -200
             exit 1
           fi
 
           PROJECT_DIR=$(dirname "$SETTINGS")
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Android project found at: $PROJECT_DIR"
+
+          echo "Project directory: $PROJECT_DIR"
+
+      - name: Fix background resource reference
+        shell: bash
+        run: |
+          set -e
+
+          find extracted -type f \
+            -name "demon_background_overlay.xml" \
+            -print0 |
+          while IFS= read -r -d '' FILE; do
+            echo "Checking $FILE"
+
+            sed -i \
+              's|@drawable-nodpi/demon_background|@drawable/demon_background|g' \
+              "$FILE"
+          done
+
+          echo "Background reference check completed."
+
+      - name: Check background image
+        shell: bash
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+
+          find app/src/main/res -type f \
+            -iname "demon_background.*" -print || true
+
+          if [ -f app/src/main/res/drawable-nodpi/demon_background.jpg ]; then
+            echo "Background image found."
+          elif [ -f app/src/main/res/drawable/demon_background.jpg ]; then
+            echo "Background image found."
+          else
+            echo "WARNING: Expected background image was not found."
+            echo "Build may fail if the XML references a missing image."
+          fi
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
